@@ -1,5 +1,5 @@
 import { ChildProcess, execFile } from "child_process";
-import { access, constants, mkdtemp, rm, writeFile } from "fs/promises";
+import { access, constants, cp, mkdir, mkdtemp, readdir, rm, writeFile } from "fs/promises";
 import net from "net";
 import { delimiter, join, resolve } from "path";
 import process from "process";
@@ -136,22 +136,39 @@ interface FirefoxExtension {
 }
 
 interface BrowserOptions {
+    /**
+     * Initial URL to open the browser window at.
+     */
     url?: string;
+    /**
+     * Suppress log messages below this level. Defaults to "warn".
+     */
     logLevel?: LogLevelStr;
+    /**
+     * The name shown on logs from this instance (e.g. `firefox`).
+     */
     logName?: string;
+    /**
+     * Path to the browser's binary. Default is to autodetect one.
+     */
     binaryPath?: string;
     /**
      * Optional list of extension IDs you intend to add. This causes ffeine to
      * automatically grant permissions to them without prompting on Firefox.
      */
     extensionIds?: string[];
+    /**
+     * A list of scripts that will be automatically executed on each new tab
+     * for the given url matches.
+     */
+    injectScripts?: { matches: (string | RegExp)[]; js: string }[];
 }
 
 export abstract class Browser {
     process?: ChildProcess;
     protected logger: Logger;
 
-    constructor(public options: BrowserOptions = {}) {
+    constructor(public readonly options: BrowserOptions = {}) {
         const logName = options.logName ?? this.constructor.name.toLowerCase();
         this.logger = new Logger(logName, LogLevel[options.logLevel ?? "warn"]);
     }
@@ -179,6 +196,7 @@ export class Firefox extends Browser {
                 .join("\n"),
         );
         await this.setupExtensionPreferences(profilePath);
+        await this.copyUserData(profilePath);
         return profilePath;
     }
 
@@ -193,6 +211,28 @@ export class Firefox extends Browser {
                 this.options.extensionIds.map(id => [id, prefs]),
             )),
         );
+    }
+
+    protected async copyUserData(profilePath: string) {
+        const userProfile = process.env.FFEINE_USER_PROFILE;
+        if (!userProfile)
+            return;
+
+        const domains = process.env.FFEINE_COPY_DOMAINS;
+        if (domains) {
+            const storage = join(profilePath, "storage", "default");
+            const userStorage = join(userProfile, "storage", "default");
+            await mkdir(storage, { recursive: true });
+            for (const entry of await readdir(userStorage)) {
+                for (const domain of domains.split(",")) {
+                    if (entry.includes(domain)) {
+                        const path = join(userStorage, entry);
+                        this.logger.info(`Copying over ${path} to ${storage}`);
+                        cp(path, storage, { recursive: true });
+                    }
+                }
+            }
+        }
     }
 
     protected async getDefaultBinary() {
@@ -226,11 +266,30 @@ export class Firefox extends Browser {
         firefox.on("exit", () => rm(profilePath, { recursive: true }));
         process.on("exit", () => firefox.kill());
         this.process = firefox;
-        this.rdp = new RDP(`ws://localhost:${port}`, {
+        const rdp = new RDP(`ws://localhost:${port}`, {
             logName: `firefox.rdp@:${port}`,
             logLevel: this.options.logLevel,
         });
-        await this.rdp.connect();
+        await rdp.connect();
+        const injectedIds = new Set<string>();
+        rdp.watch("tabListChanged", "listTabs", async ({ tabs }) => {
+            if (!this.options.injectScripts)
+                return;
+            for (const { actor, browserId, url } of tabs) {
+                if (injectedIds.has(browserId))
+                    continue;
+
+                for (const { matches, js } of this.options.injectScripts) {
+                    if (!matches.some(m => (<string>url).match(m)))
+                        continue;
+
+                    const { frame } = await rdp.request("getTarget", actor);
+                    await rdp.request("evaluateJSAsync", frame.consoleActor, { text: js });
+                }
+                injectedIds.add(browserId);
+            }
+        });
+        this.rdp = rdp;
     }
 
     protected async waitForRDP(): Promise<RDP> {
@@ -276,11 +335,13 @@ export class RDP {
     protected logger: Logger;
     protected ws?: WebSocket;
     protected pendingReplies: Record<string, [(r: any) => void, (e: any) => void][]>;
+    protected listeners: Record<string, [any, (data: any, reply: any) => void][]>;
 
     constructor(public address: string, public options: RDPOptions = {}) {
         this.logger = new Logger(options.logName ?? "rdp", LogLevel[options.logLevel ?? "error"]);
         this.connected = false;
         this.pendingReplies = {};
+        this.listeners = {};
     }
 
     async connect() {
@@ -301,6 +362,7 @@ export class RDP {
                     });
                 });
             } catch (e) {
+                this.logger.info(e);
                 continue;
             }
             this.connected = true;
@@ -317,9 +379,37 @@ export class RDP {
         return new Promise((resolve, reject) => (this.pendingReplies[to] ??= []).push([resolve, reject]));
     }
 
+    async watch(
+        event: string,
+        execute: { type: string; to?: string; props?: any } | string,
+        cb: (data: any, reply: any) => void,
+    ) {
+        if (typeof execute === "string")
+            execute = { type: execute };
+        await this.request(execute.type, execute.to, execute.props);
+        (this.listeners[event] ??= []).push([execute, cb]);
+    }
+
+    async unwatch(event: string, callback: (data: any, reply: any) => void) {
+        const listeners = this.listeners[event];
+        const i = listeners.findIndex(([, cb]) => cb === callback);
+        if (i >= 0) listeners.splice(i);
+    }
+
     protected onMessage(data: Buffer) {
         const reply = JSON.parse(data.toString("utf8"));
         this.logger.debug(reply);
+
+        if (reply.type) {
+            this.listeners[reply.type]?.forEach(async ([r, cb]) =>
+                cb(
+                    await this.request(r.type, r.to, r.props),
+                    reply,
+                )
+            );
+            return;
+        }
+
         const [resolve, reject] = this.pendingReplies[reply.from]?.shift() ?? [];
         if (!resolve || !reject) {
             this.logger.warn("Received unexpected reply!", reply);
