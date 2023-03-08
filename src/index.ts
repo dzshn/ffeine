@@ -64,6 +64,7 @@ const firefoxPreferences: Record<string, any> = {
     "xpinstall.signatures.required": false,
 
     // disable some first-startup things
+    "browser.aboutConfig.showWarning": false,
     "browser.reader.detectedFirstArticle": true,
     "browser.startup.homepage": "about:blank",
     "browser.tabs.firefox-view": false,
@@ -139,6 +140,11 @@ interface BrowserOptions {
     logLevel?: LogLevelStr;
     logName?: string;
     binaryPath?: string;
+    /**
+     * Optional list of extension IDs you intend to add. This causes ffeine to
+     * automatically grant permissions to them without prompting on Firefox.
+     */
+    extensionIds?: string[];
 }
 
 export abstract class Browser {
@@ -172,8 +178,21 @@ export class Firefox extends Browser {
                 .map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`)
                 .join("\n"),
         );
-
+        await this.setupExtensionPreferences(profilePath);
         return profilePath;
+    }
+
+    protected async setupExtensionPreferences(profilePath: string) {
+        if (!this.options.extensionIds)
+            return;
+        // XXX: maybe `permissions` could be configurable?
+        const prefs = { permissions: [], origins: ["<all_urls>"] };
+        await writeFile(
+            join(profilePath, "extension-preferences.json"),
+            JSON.stringify(Object.fromEntries(
+                this.options.extensionIds.map(id => [id, prefs]),
+            )),
+        );
     }
 
     protected async getDefaultBinary() {
@@ -208,7 +227,7 @@ export class Firefox extends Browser {
         process.on("exit", () => firefox.kill());
         this.process = firefox;
         this.rdp = new RDP(`ws://localhost:${port}`, {
-            logName: `rdp@:${port}`,
+            logName: `firefox.rdp@:${port}`,
             logLevel: this.options.logLevel,
         });
         await this.rdp.connect();
@@ -270,7 +289,10 @@ export class RDP {
                 this.ws = await new Promise((resolve, reject) => {
                     this.logger.info(i > 1 ? `Connecting RDP (attempt ${i})` : "Connecting RDP");
                     const ws = new WebSocket(this.address);
-                    ws.once("open", () => this.logger.info("Waiting for initial message"));
+                    ws.once("open", () => {
+                        this.logger.info("Waiting for initial message");
+                        setTimeout(() => reject(), 1500);
+                    });
                     ws.once("error", e => setTimeout(() => reject(e), 1500));
                     ws.once("message", data => {
                         this.logger.debug(data.toString("utf8"));
@@ -298,7 +320,7 @@ export class RDP {
     protected onMessage(data: Buffer) {
         const reply = JSON.parse(data.toString("utf8"));
         this.logger.debug(reply);
-        const [resolve, reject] = this.pendingReplies[reply.from].shift() ?? [];
+        const [resolve, reject] = this.pendingReplies[reply.from]?.shift() ?? [];
         if (!resolve || !reject) {
             this.logger.warn("Received unexpected reply!", reply);
             return;
