@@ -117,7 +117,7 @@ class Logger {
     error = ffeineLog.bind(this, "error");
 }
 
-interface Extension {
+interface FirefoxExtension {
     actor: string;
     debuggable: boolean;
     hidden: boolean;
@@ -143,9 +143,7 @@ interface BrowserOptions {
 
 export abstract class Browser {
     process?: ChildProcess;
-    cdp?: CDP;
     protected logger: Logger;
-    protected cachedActors?: any;
 
     constructor(public options: BrowserOptions = {}) {
         const logName = options.logName ?? this.constructor.name.toLowerCase();
@@ -155,40 +153,15 @@ export abstract class Browser {
     /** Launch the browser and setup debugger connection. */
     abstract launch(): Promise<void>;
 
-    protected async waitForCDP(): Promise<CDP> {
-        if (!this.cdp) {
-            await this.launch();
-            if (!this.cdp)
-                throw new Error("failed to start launch browser");
-        }
-        return this.cdp;
-    }
+    abstract installExtension(path: string): Promise<any>;
 
-    async getActors() {
-        return this.cachedActors ??= await (await this.waitForCDP()).request("getRoot");
-    }
-
-    async installExtension(path: string) {
-        path = resolve(path);
-        const cdp = await this.waitForCDP();
-        const { addonsActor } = await this.getActors();
-        const reply = await cdp.request("installTemporaryAddon", addonsActor, { addonPath: path });
-        const addonId = reply.addon.id as string;
-        return (await this.listExtensions()).find(({ id }) => id === addonId) as Extension;
-    }
-
-    async listExtensions() {
-        const cdp = await this.waitForCDP();
-        return (await cdp.request("listAddons")).addons as any[];
-    }
-
-    async reloadExtension(ext: Extension) {
-        const cdp = await this.waitForCDP();
-        await cdp.request("reload", ext.actor);
-    }
+    abstract reloadExtension(extension: any): Promise<void>;
 }
 
 export class Firefox extends Browser {
+    rdp?: RDP;
+    protected cachedActors?: any;
+
     protected async setupProfile(): Promise<string> {
         const profilePath = await mkdtemp(join(await getTempDir(), "ffeine."));
         this.logger.debug(`Creating temporary profile at ${profilePath}}`);
@@ -234,28 +207,59 @@ export class Firefox extends Browser {
         firefox.on("exit", () => rm(profilePath, { recursive: true }));
         process.on("exit", () => firefox.kill());
         this.process = firefox;
-        this.cdp = new CDP(`ws://localhost:${port}`, {
-            logName: `cdp@:${port}`,
+        this.rdp = new RDP(`ws://localhost:${port}`, {
+            logName: `rdp@:${port}`,
             logLevel: this.options.logLevel,
         });
-        await this.cdp.connect();
+        await this.rdp.connect();
+    }
+
+    protected async waitForRDP(): Promise<RDP> {
+        if (!this.rdp) {
+            await this.launch();
+            if (!this.rdp)
+                throw new Error("failed to start launch browser");
+        }
+        return this.rdp;
+    }
+
+    async getActors() {
+        return this.cachedActors ??= await (await this.waitForRDP()).request("getRoot");
+    }
+
+    async installExtension(path: string) {
+        path = resolve(path);
+        const rdp = await this.waitForRDP();
+        const { addonsActor } = await this.getActors();
+        const reply = await rdp.request("installTemporaryAddon", addonsActor, { addonPath: path });
+        const addonId = reply.addon.id as string;
+        return (await this.listExtensions()).find(({ id }) => id === addonId) as FirefoxExtension;
+    }
+
+    async listExtensions() {
+        const rdp = await this.waitForRDP();
+        return (await rdp.request("listAddons")).addons as any[];
+    }
+
+    async reloadExtension(ext: FirefoxExtension) {
+        const rdp = await this.waitForRDP();
+        await rdp.request("reload", ext.actor);
     }
 }
 
-interface CDPOptions {
+interface RDPOptions {
     logLevel?: LogLevelStr;
     logName?: string;
 }
 
-/** Class implementing the Chrome Debugging Protocol, which is (partially) supported by Firefox */
-export class CDP {
+export class RDP {
     connected: boolean;
     protected logger: Logger;
     protected ws?: WebSocket;
     protected pendingReplies: Record<string, [(r: any) => void, (e: any) => void][]>;
 
-    constructor(public address: string, public options: CDPOptions = {}) {
-        this.logger = new Logger(options.logName ?? "cdp", LogLevel[options.logLevel ?? "error"]);
+    constructor(public address: string, public options: RDPOptions = {}) {
+        this.logger = new Logger(options.logName ?? "rdp", LogLevel[options.logLevel ?? "error"]);
         this.connected = false;
         this.pendingReplies = {};
     }
@@ -264,8 +268,9 @@ export class CDP {
         for (let i = 1; i <= 5; i++) {
             try {
                 this.ws = await new Promise((resolve, reject) => {
-                    this.logger.info(i > 1 ? `Connecting CDP (attempt ${i})` : "Connecting CDP");
+                    this.logger.info(i > 1 ? `Connecting RDP (attempt ${i})` : "Connecting RDP");
                     const ws = new WebSocket(this.address);
+                    ws.once("open", () => this.logger.info("Waiting for initial message"));
                     ws.once("error", e => setTimeout(() => reject(e), 1500));
                     ws.once("message", data => {
                         this.logger.debug(data.toString("utf8"));
@@ -280,7 +285,7 @@ export class CDP {
             this.logger.info("Connected!");
             return;
         }
-        throw new Error("failed to connect CDP");
+        throw new Error("failed to connect RDP");
     }
 
     async request(type: string, to = "root", props: any = {}): Promise<any> {
