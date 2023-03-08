@@ -118,7 +118,7 @@ class Logger {
     error = ffeineLog.bind(this, "error");
 }
 
-interface FirefoxExtension {
+export interface FirefoxExtension {
     actor: string;
     debuggable: boolean;
     hidden: boolean;
@@ -135,7 +135,7 @@ interface FirefoxExtension {
     warnings: unknown[];
 }
 
-interface BrowserOptions {
+export interface BrowserOptions {
     /**
      * Initial URL to open the browser window at.
      */
@@ -325,7 +325,7 @@ export class Firefox extends Browser {
     }
 }
 
-interface RDPOptions {
+export interface RDPOptions {
     logLevel?: LogLevelStr;
     logName?: string;
 }
