@@ -4,6 +4,7 @@
     "description": "Tiny web-ext run alternative",
     "license": "GPL-3.0-or-later",
     "homepage": "https://github.com/dzshn/ffeine",
+    "main": "src/index.ts",
     "repository": {
         "type": "git",
         "url": "https://github.com/dzshn/ffeine"

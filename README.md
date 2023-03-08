@@ -1,5 +1,7 @@
 # ffeine
 
+A tiny alternative to `web-ext run`, for usage in build scripts.
+
 ```typescript
 import { Firefox } from "ffeine";
 
