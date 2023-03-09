@@ -196,7 +196,6 @@ export class Firefox extends Browser {
                 .join("\n"),
         );
         await this.setupExtensionPreferences(profilePath);
-        await this.copyUserData(profilePath);
         return profilePath;
     }
 
@@ -211,28 +210,6 @@ export class Firefox extends Browser {
                 this.options.extensionIds.map(id => [id, prefs]),
             )),
         );
-    }
-
-    protected async copyUserData(profilePath: string) {
-        const userProfile = process.env.FFEINE_USER_PROFILE;
-        if (!userProfile)
-            return;
-
-        const domains = process.env.FFEINE_COPY_DOMAINS;
-        if (domains) {
-            const storage = join(profilePath, "storage", "default");
-            const userStorage = join(userProfile, "storage", "default");
-            await mkdir(storage, { recursive: true });
-            for (const entry of await readdir(userStorage)) {
-                for (const domain of domains.split(",")) {
-                    if (entry.includes(domain)) {
-                        const path = join(userStorage, entry);
-                        this.logger.info(`Copying over ${path} to ${storage}`);
-                        cp(path, storage, { recursive: true });
-                    }
-                }
-            }
-        }
     }
 
     protected async getDefaultBinary() {
