@@ -1,5 +1,6 @@
 import { ChildProcess, execFile } from "child_process";
-import { access, constants, cp, mkdir, mkdtemp, readdir, rm, writeFile } from "fs/promises";
+import { existsSync } from "fs";
+import { access, constants, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import net from "net";
 import { delimiter, join, resolve } from "path";
 import process from "process";
@@ -186,16 +187,22 @@ export class Firefox extends Browser {
     protected cachedActors?: any;
 
     protected async setupProfile(): Promise<string> {
-        const profilePath = await mkdtemp(join(await getTempDir(), "ffeine."));
-        this.logger.debug(`Creating temporary profile at ${profilePath}}`);
-        await writeFile(
-            // why is it a js file what
-            join(profilePath, "prefs.js"),
-            Object.entries(firefoxPreferences)
-                .map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`)
-                .join("\n"),
-        );
-        await this.setupExtensionPreferences(profilePath);
+        const customProfile = process.env.FFEINE_FIREFOX_PROFILE;
+        const profilePath = customProfile
+            || await mkdtemp(join(await getTempDir(), "ffeine."));
+        this.logger.info(`Using profile at ${profilePath}`);
+        if (!customProfile || !existsSync(customProfile)) {
+            if (customProfile)
+                mkdir(customProfile, { recursive: true });
+            await writeFile(
+                // why is it a js file what
+                join(profilePath, "prefs.js"),
+                Object.entries(firefoxPreferences)
+                    .map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`)
+                    .join("\n"),
+            );
+            await this.setupExtensionPreferences(profilePath);
+        }
         return profilePath;
     }
 
@@ -257,7 +264,7 @@ export class Firefox extends Browser {
                     continue;
 
                 for (const { matches, js } of this.options.injectScripts) {
-                    if (!matches.some(m => (<string>url).match(m)))
+                    if (!matches.some(m => (<string> url).match(m)))
                         continue;
 
                     const { frame } = await rdp.request("getTarget", actor);
