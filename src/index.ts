@@ -186,7 +186,7 @@ export class Firefox extends Browser {
     rdp?: RDP;
     protected cachedActors?: any;
 
-    protected async setupProfile(): Promise<string> {
+    protected async setupProfile() {
         const customProfile = process.env.FFEINE_FIREFOX_PROFILE;
         const profilePath = customProfile
             || await mkdtemp(join(await getTempDir(), "ffeine."));
@@ -203,7 +203,7 @@ export class Firefox extends Browser {
             );
             await this.setupExtensionPreferences(profilePath);
         }
-        return profilePath;
+        return [profilePath, !!customProfile] as [string, boolean];
     }
 
     protected async setupExtensionPreferences(profilePath: string) {
@@ -231,7 +231,7 @@ export class Firefox extends Browser {
             throw new Error("couldn't find a suitable firefox executable");
 
         const port = await findAvailablePort();
-        const profilePath = await this.setupProfile();
+        const [profilePath, profilePersistent] = await this.setupProfile();
         const args = [
             "--no-remote", // (don't send remote commands to other firefox instances)
             "--start-debugger-server",
@@ -247,7 +247,8 @@ export class Firefox extends Browser {
         const firefox = execFile(binaryPath, args);
         firefox.stdout?.on("data", data => firefoxLogger.debug("(stdout)", data));
         firefox.stderr?.on("data", data => firefoxLogger.debug("(stderr)", data));
-        firefox.on("exit", () => rm(profilePath, { recursive: true }));
+        if (!profilePersistent)
+            firefox.on("exit", () => rm(profilePath, { recursive: true }));
         process.on("exit", () => firefox.kill());
         this.process = firefox;
         const rdp = new RDP(`ws://localhost:${port}`, {
